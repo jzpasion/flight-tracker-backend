@@ -1,37 +1,129 @@
 import express from "express";
+import {
+  destinationPoint,
+  generateRandomColor,
+  getFlightColor,
+} from "./globalFunction.mjs";
+import { latLng } from "../interface/globalInterface.mjs";
+import asyncHandler from "express-async-handler";
+import { Server, Socket } from "socket.io";
 import axios from "axios";
 
 const router = express.Router();
 
-// get the airplanes from the given location and radius
+// store intervals per socket
 
-router.get("location/:lat/:lon/:rad", async (req, res) => {
-  const { lat } = req.params;
-  const { lon } = req.params;
-  const { rad } = req.params;
-  try {
-    const result = await axios.get(
-      `https://api.adsb.lol/v2/point/${lat}/${lon}/${rad}`
-    );
-    res.json(result);
-  } catch (err: any) {
-    res.status(500).json({ error: "API error", details: err.message });
-  }
-});
+const flightIntervals: Record<string, NodeJS.Timeout> = {};
 
-// get flight details
+export default function initFlightHandler(io: Server) {
+  io.on("connection", (socket: Socket) => {
+    console.log(`connected ${socket.id}`);
 
-router.get("flight/:flight", async (req, res) => {
-  const { flight } = req.params;
+    socket.on("getFlightsOnLocation", async (lat: any, lon: any, rad: any) => {
+      // clear any existing interval for this socket
+      if (flightIntervals[socket.id]) {
+        clearInterval(flightIntervals[socket.id]);
+      }
 
-  try {
-    const result = await axios.get(
-      ` https://api.aviationstack.com/v1/flights?access_key=1f6a4d26e87c06600395a124b651ca56&flight_iata=${flight}`
-    );
-    res.json(result);
-  } catch (err: any) {
-    res.status(500).json({ error: "API error", details: err.message });
-  }
-});
+      const interval = setInterval(async () => {
+        try {
+          // getting the list of flight inside the radius
+          const listofFlights = await axios.get(
+            `https://api.adsb.lol/v2/point/${lat}/${lon}/${rad}`
+          );
 
-// export default router;
+          const flights = listofFlights.data.ac;
+
+          // checking if there are no flights
+          if (!flights || flights.length === 0) {
+            socket.emit("flightsOnLocation", []);
+            socket.emit("flightDetails", []);
+            return;
+          }
+
+          const removeFlights = flights.filter((toRemove: any) => {
+            return (
+              toRemove.alt_baro > 100 &&
+              toRemove.flight &&
+              !toRemove.flight.includes("@")
+            );
+          });
+
+          const flightsWithColor = removeFlights.map((flight: any) => ({
+            ...flight,
+            color: getFlightColor(flight.flight),
+          }));
+
+          socket.emit("flightDetails", flightsWithColor);
+
+          // get the flight details
+          const flightDetailsList = await Promise.all(
+            flightsWithColor.map((flight: any) => {
+              return axios
+                .get(`https://api.adsbdb.com/v0/callsign/${flight.flight}`)
+                .then((res) => {
+                  return {
+                    ...res.data.response.flightroute,
+                    color: flight.color,
+                  };
+                })
+                .catch((err) => {
+                  console.log("Callsign error:", err.message);
+                  return null;
+                });
+            })
+          );
+
+          // filter all flights
+
+          const flightList = flightDetailsList.filter(
+            (flight: any) => flight !== null
+          );
+
+          socket.emit("flightsOnLocation", flightList);
+        } catch (err: any) {
+          console.log("API error:", err.message);
+        }
+      }, 10000); // Every 10 seconds
+
+      // Store the interval for cleanup
+      flightIntervals[socket.id] = interval;
+    });
+
+    socket.on("getRadiusMap", async (lat: any, lon: any, rad: any) => {
+      let tempRadiusLat: latLng[] = [];
+
+      for (let i = 0; i <= 360; i++) {
+        let dest = destinationPoint(lat, lon, rad, i);
+        tempRadiusLat.push(dest);
+      }
+
+      socket.emit("markRadius", tempRadiusLat);
+    });
+
+    socket.on("disconnect", () => {
+      console.log(`disconnected ${socket.id}`);
+      if (flightIntervals[socket.id]) {
+        clearInterval(flightIntervals[socket.id]);
+        delete flightIntervals[socket.id];
+      }
+    });
+  });
+}
+
+router.get(
+  "getRadius/:lat/:lon/:rad",
+  asyncHandler(async (req, res) => {
+    const { lat } = req.params;
+    const { lon } = req.params;
+    const { rad } = req.params;
+
+    let tempRadiusLat: latLng[] = [];
+
+    for (let i = 0; i <= 360; i++) {
+      let dest = destinationPoint(lat, lon, rad, i);
+      tempRadiusLat.push(dest);
+    }
+    res.json(tempRadiusLat);
+  })
+);
