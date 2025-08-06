@@ -110,20 +110,3 @@ export default function initFlightHandler(io: Server) {
     });
   });
 }
-
-router.get(
-  "getRadius/:lat/:lon/:rad",
-  asyncHandler(async (req, res) => {
-    const { lat } = req.params;
-    const { lon } = req.params;
-    const { rad } = req.params;
-
-    let tempRadiusLat: latLng[] = [];
-
-    for (let i = 0; i <= 360; i++) {
-      let dest = destinationPoint(lat, lon, rad, i);
-      tempRadiusLat.push(dest);
-    }
-    res.json(tempRadiusLat);
-  })
-);
