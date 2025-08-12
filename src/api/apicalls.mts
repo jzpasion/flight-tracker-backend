@@ -84,7 +84,7 @@ export default function initFlightHandler(io: Server) {
         } catch (err: any) {
           console.log("API error:", err.message);
         }
-      }, 10000); // Every 10 seconds
+      }, 7000); // Every 7 seconds
 
       // Store the interval for cleanup
       flightIntervals[socket.id] = interval;
