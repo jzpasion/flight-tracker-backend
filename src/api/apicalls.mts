@@ -19,14 +19,17 @@ const flightIntervals: Record<string, NodeJS.Timeout> = {};
 const flightFetchBusy: Record<string, boolean> = {};
 
 // per-request timeout so a hanging provider fails fast instead of blocking
-const REQUEST_TIMEOUT_MS = 5000;
+const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS) || 5000;
+
+// how often (ms) to refresh the flight list for each subscribed client
+const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS) || 7000;
 
 // flight-list providers, tried in order. Both run readsb and share the same
 // /v2/point schema ({ ac: [...] }), so response handling is identical.
-const FLIGHT_LIST_PROVIDERS = [
-  "https://api.airplanes.live/v2/point",
-  "https://api.adsb.lol/v2/point",
-];
+// Override with a comma-separated FLIGHT_LIST_PROVIDERS env var.
+const FLIGHT_LIST_PROVIDERS = process.env.FLIGHT_LIST_PROVIDERS
+  ? process.env.FLIGHT_LIST_PROVIDERS.split(",").map((url) => url.trim())
+  : ["https://api.airplanes.live/v2/point", "https://api.adsb.lol/v2/point"];
 
 // fetch the flight list, falling back to the next provider on failure.
 // returns the `ac` array on success, or null if every provider failed.
@@ -122,7 +125,7 @@ export default function initFlightHandler(io: Server) {
         } finally {
           flightFetchBusy[socket.id] = false;
         }
-      }, 7000); // Every 7 seconds
+      }, POLL_INTERVAL_MS);
 
       // Store the interval for cleanup
       flightIntervals[socket.id] = interval;

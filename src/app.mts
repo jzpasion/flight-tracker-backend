@@ -5,7 +5,7 @@ import { createServer } from "http";
 import { initSocket } from "./socket/socketService.mjs";
 import initFlightHandler from "./api/apicalls.mjs";
 
-const PORT = 8000;
+const PORT = Number(process.env.PORT) || 8000;
 
 const app = express();
 
@@ -18,7 +18,7 @@ const server = createServer(app);
 
 const io = initSocket(server, {
   cors: {
-    origin: "*",
+    origin: process.env.CORS_ORIGIN || "*",
     methods: ["GET", "POST"],
     credentials: true,
   },

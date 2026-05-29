@@ -6,9 +6,9 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "build": "npx tsc",
-    "start": "node dist/app.mjs",
+    "start": "node --env-file-if-exists=.env dist/app.mjs",
     "start:dev": "npx tsc --watch",
-    "dev": "nodemon dist/app.mjs & npx tsc -w"
+    "dev": "nodemon --env-file-if-exists=.env dist/app.mjs & npx tsc -w"
   },
   "keywords": [],
   "author": "",
