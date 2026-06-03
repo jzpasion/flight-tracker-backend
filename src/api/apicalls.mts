@@ -8,6 +8,16 @@ import { latLng } from "../interface/globalInterface.mjs";
 import asyncHandler from "express-async-handler";
 import { Server, Socket } from "socket.io";
 import axios from "axios";
+import http from "http";
+import https from "https";
+
+// Force IPv4 + keep-alive for all outbound API calls. adsbdb publishes an IPv6
+// address, but Docker's default bridge network has no IPv6 route — Node then
+// burns its connect budget on the unreachable IPv6 (Happy Eyeballs abandons the
+// working IPv4 connection) and the request fails with ETIMEDOUT. Pinning family 4
+// avoids that; keepAlive reuses connections across the frequent polls.
+axios.defaults.httpAgent = new http.Agent({ keepAlive: true, family: 4 });
+axios.defaults.httpsAgent = new https.Agent({ keepAlive: true, family: 4 });
 
 const router = express.Router();
 
@@ -47,6 +57,45 @@ async function fetchFlightList(lat: any, lon: any, rad: any) {
   return null;
 }
 
+// Cache resolved routes per callsign. A flight's route is static for the day, so
+// caching: (1) stops us re-querying adsbdb for the same callsign every poll
+// (avoids rate-limiting), and (2) keeps a flight in the list across polls even if
+// a later lookup is slow or fails — the route flapping in/out was the cause of
+// flights "appearing then disappearing".
+const ROUTE_TTL_MS = 12 * 60 * 60 * 1000; // 12h
+const routeCache = new Map<string, { route: any | null; ts: number }>();
+
+// Resolve a callsign to its route ({ origin, destination, airline, ... } + color),
+// or null when the callsign has no known route. Served from cache when possible;
+// transient failures are NOT cached (so they retry) and fall back to any prior value.
+async function resolveRoute(rawCallsign: any, color: string) {
+  const callsign = String(rawCallsign).trim();
+  const cached = routeCache.get(callsign);
+  if (cached && Date.now() - cached.ts < ROUTE_TTL_MS) {
+    return cached.route ? { ...cached.route, color } : null;
+  }
+  try {
+    const res = await axios.get(
+      `https://api.adsbdb.com/v0/callsign/${encodeURIComponent(callsign)}`,
+      { timeout: REQUEST_TIMEOUT_MS }
+    );
+    const route = res.data?.response?.flightroute ?? null;
+    routeCache.set(callsign, { route, ts: Date.now() });
+    return route ? { ...route, color } : null;
+  } catch (err: any) {
+    const status = err?.response?.status;
+    // 4xx (other than rate-limit) means the callsign is genuinely unknown — cache
+    // the negative so we stop re-querying it. Transient errors (timeout / 429 /
+    // 5xx / network) are not cached; keep showing the last known route if we have one.
+    if (status && status >= 400 && status < 500 && status !== 429) {
+      routeCache.set(callsign, { route: null, ts: Date.now() });
+      return null;
+    }
+    console.log(`Callsign lookup failed (${callsign}) [${status ?? err.code ?? "?"}]`);
+    return cached ? (cached.route ? { ...cached.route, color } : null) : null;
+  }
+}
+
 export default function initFlightHandler(io: Server) {
   io.on("connection", (socket: Socket) => {
     console.log(`connected ${socket.id}`);
@@ -79,8 +128,18 @@ export default function initFlightHandler(io: Server) {
           }
 
           const removeFlights = flights.filter((toRemove: any) => {
+            // alt_baro is the string "ground" for surface traffic and is absent
+            // on some airborne aircraft that only report geometric altitude — fall
+            // back to alt_geom so those planes aren't wrongly dropped.
+            const altitude =
+              typeof toRemove.alt_baro === "number"
+                ? toRemove.alt_baro
+                : typeof toRemove.alt_geom === "number"
+                ? toRemove.alt_geom
+                : null;
             return (
-              toRemove.alt_baro > 100 &&
+              altitude !== null &&
+              altitude > 100 &&
               toRemove.flight &&
               !toRemove.flight.includes("@")
             );
@@ -95,22 +154,9 @@ export default function initFlightHandler(io: Server) {
 
           // get the flight details
           const flightDetailsList = await Promise.all(
-            flightsWithColor.map((flight: any) => {
-              return axios
-                .get(`https://api.adsbdb.com/v0/callsign/${flight.flight}`, {
-                  timeout: REQUEST_TIMEOUT_MS,
-                })
-                .then((res) => {
-                  return {
-                    ...res.data.response.flightroute,
-                    color: flight.color,
-                  };
-                })
-                .catch((err) => {
-                  console.log("Callsign error:", err.message);
-                  return null;
-                });
-            })
+            flightsWithColor.map((flight: any) =>
+              resolveRoute(flight.flight, flight.color)
+            )
           );
 
           // filter all flights
